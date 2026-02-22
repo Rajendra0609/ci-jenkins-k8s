@@ -1,0 +1,88 @@
+########################################
+# Kubernetes
+########################################
+kubernetes
+kubernetes-credentials
+kubernetes-cli
+
+########################################
+# Core Pipeline
+########################################
+workflow-aggregator
+workflow-multibranch
+pipeline-utility-steps
+pipeline-stage-view
+pipeline-maven
+
+########################################
+# Source Control
+########################################
+git
+github-branch-source
+gitlab-branch-source
+
+########################################
+# Security & Authentication
+########################################
+matrix-auth
+role-strategy
+authorize-project
+antisamy-markup-formatter
+audit-trail
+ldap
+active-directory
+oic-auth
+saml
+credentials-binding
+ssh-agent
+
+########################################
+# Build Stability & Logging
+########################################
+build-timeout
+timestamper
+ansicolor
+parallel-test-executor
+
+########################################
+# Artifact & Container Registries
+########################################
+artifact-manager-s3
+nexus-artifact-uploader
+artifactory
+amazon-ecr
+google-container-registry-auth
+
+########################################
+# Code Quality & Security Scanning
+########################################
+junit
+cobertura
+warnings-ng
+sonar
+dependency-check-jenkins-plugin
+
+########################################
+# Infrastructure & DevOps
+########################################
+terraform
+ansible
+
+########################################
+# Monitoring & Notifications
+########################################
+prometheus
+metrics
+monitoring
+email-ext
+slack
+
+########################################
+# UI & UX (Optional but Common)
+########################################
+blueocean
+
+########################################
+# Configuration as Code
+########################################
+configuration-as-code
