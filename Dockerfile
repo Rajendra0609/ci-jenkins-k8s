@@ -1,40 +1,76 @@
-# Use official Jenkins LTS
-FROM jenkins/jenkins:2.541.2
+FROM jenkins/inbound-agent:latest
 
 LABEL maintainer="rajendra.daggubati1997@gmail.com" \
-      version="2.541.2-k8s" \
-      description="Production-ready Jenkins for Kubernetes" \
+      version="2.492.3" \
+      description="Jenkins with Docker support" \
       org.opencontainers.image.source="https://github.com/Chowdary1997/Jenkins_jenkins_nodes_Dockerfle.git" \
       org.opencontainers.image.licenses="MIT"
 
+# Install Docker CLI and dependencies
 USER root
 
-# Install minimal required tools (NO Docker inside container)
+# Environment variables (defaults can be overridden at runtime)
+ENV JENKINS_URL="" \
+    JENKINS_SECRET="" \
+    JENKINS_AGENT_NAME="docker" \
+    JENKINS_WEB_SOCKET="true" \
+    JENKINS_AGENT_WORKDIR="/var/jenkins_home/node"
+
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends \
-        curl \
-        ca-certificates \
-        git \
-        maven \
-        gnupg && \
+    apt-get install -y \
+    apt-transport-https \
+    ca-certificates \
+    curl \
+    wget \
+    maven \
+    gnupg \
+    lsb-release \
+    lynis \
+    colorized-logs \
+    fontconfig \
+    openjdk-21-jre && \
+    install -m 0755 -d /etc/apt/keyrings && \
+    curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc && \
+    chmod a+r /etc/apt/keyrings/docker.asc && \
+    bash -c 'echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian \
+    $(. /etc/os-release && echo ${VERSION_CODENAME}) stable" > /etc/apt/sources.list.d/docker.list' && \
+    apt-get update && \
+    apt-get install -y docker-ce docker-ce-cli containerd.io && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
-# Install recommended production plugins
-COPY --chown=jenkins:jenkins plugins.txt /usr/share/jenkins/ref/plugins.txt
-RUN jenkins-plugin-cli --plugin-file /usr/share/jenkins/ref/plugins.txt
+# Install Gitleaks (latest release)
+RUN set -eux; \
+    GITLEAKS_URL=$(curl -s https://api.github.com/repos/gitleaks/gitleaks/releases/latest \
+        | grep "browser_download_url" \
+        | grep "linux_x64.tar.gz" \
+        | cut -d '"' -f 4); \
+    curl -L "$GITLEAKS_URL" -o gitleaks.tar.gz; \
+    tar -xzf gitleaks.tar.gz; \
+    chmod +x gitleaks; \
+    mv gitleaks /usr/local/bin/gitleaks; \
+    rm gitleaks.tar.gz
 
-# Disable setup wizard (production auto setup)
-ENV JAVA_OPTS="-Djenkins.install.runSetupWizard=false"
+RUN wget -O- https://apt.releases.hashicorp.com/gpg | \
+    gpg --dearmor | \
+    tee /usr/share/keyrings/hashicorp-archive-keyring.gpg > /dev/null
 
-# Security hardening
-RUN mkdir -p /var/jenkins_home && \
-    chown -R jenkins:jenkins /var/jenkins_home
+RUN gpg --no-default-keyring \
+    --keyring /usr/share/keyrings/hashicorp-archive-keyring.gpg \
+    --fingerprint
 
-VOLUME /var/jenkins_home
+RUN echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/hashicorp-archive-keyring.gpg] https://apt.releases.hashicorp.com $(grep -oP '(?<=UBUNTU_CODENAME=).*' /etc/os-release || lsb_release -cs) main" | tee /etc/apt/sources.list.d/hashicorp.list
 
-EXPOSE 8080
+RUN apt update
+RUN apt-get install -y terraform
 
-USER jenkins
+# Copy the script into the image
+COPY node_status.sh /usr/local/bin/node_status.sh
 
-ENTRYPOINT ["/usr/local/bin/jenkins.sh"]
+# Make it executable
+RUN chmod +x /usr/local/bin/node_status.sh
+COPY entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+# Optional: Create volume
+VOLUME /var/jenkins_home/node
+ENTRYPOINT ["/entrypoint.sh"]
