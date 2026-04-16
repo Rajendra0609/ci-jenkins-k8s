@@ -10,6 +10,6 @@ export DESTINATION="docker.io/daggu1997/jenkins-docker-k8s:v1.0.1"
 
 ./build-kaniko.sh \
   --docker-config "/root/.docker/config.json" \
-  --destination "docker.io/daggu1997/jenkins-docker-k8s:v1.0.1" \
+  --destination "docker.io/daggu1997/jenkins-node-k8s:v1.0.1" \
   --cache-repo "docker.io/daggu1997/cache" \
   --verbosity info
