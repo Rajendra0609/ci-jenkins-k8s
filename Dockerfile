@@ -1,76 +1,228 @@
-FROM jenkins/inbound-agent:latest
+# ─────────────────────────────────────────────────────────────────────────────
+# Jenkins Inbound Agent — Docker + Terraform + Gitleaks + Security Tools
+#
+# Usage:
+#   docker build \
+#     --build-arg GITLEAKS_VERSION=8.24.3 \
+#     --build-arg TERRAFORM_VERSION=1.11.4 \
+#     -t jenkins-agent:latest .
+#
+# Runtime:
+#   docker run --rm \
+#     -e JENKINS_URL=https://jenkins.example.com \
+#     -e JENKINS_SECRET=<secret> \
+#     -e JENKINS_AGENT_NAME=docker-node \
+#     -v /var/run/docker.sock:/var/run/docker.sock \
+#     jenkins-agent:latest
+# ─────────────────────────────────────────────────────────────────────────────
 
+# ── Build-time version pins (override with --build-arg) ──────────────────────
+ARG JENKINS_AGENT_BASE=latest
+ARG GITLEAKS_VERSION=8.24.3
+ARG TERRAFORM_VERSION=1.11.4
+# Java is intentionally NOT an ARG — hardcoded to 21 throughout this file
+# to prevent accidental downgrades via --build-arg at build time.
+
+# ─────────────────────────────────────────────────────────────────────────────
+# BASE STAGE
+# ─────────────────────────────────────────────────────────────────────────────
+FROM jenkins/inbound-agent:${JENKINS_AGENT_BASE}
+
+# Re-declare ARGs after FROM so they're visible in this stage
+ARG GITLEAKS_VERSION
+ARG TERRAFORM_VERSION
+
+# ── OCI-compliant image labels ────────────────────────────────────────────────
 LABEL maintainer="rajendra.daggubati1997@gmail.com" \
       version="2.492.3" \
-      description="Jenkins with Docker support" \
+      description="Jenkins inbound agent with Docker CLI, Terraform, Gitleaks, Python 3 and security tooling" \
       org.opencontainers.image.source="https://github.com/Chowdary1997/Jenkins_jenkins_nodes_Dockerfle.git" \
-      org.opencontainers.image.licenses="MIT"
+      org.opencontainers.image.licenses="MIT" \
+      org.opencontainers.image.created="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+      org.opencontainers.image.vendor="Raja DevOps" \
+      org.opencontainers.image.title="Jenkins Inbound Agent" \
+      org.opencontainers.image.documentation="https://github.com/Chowdary1997/Jenkins_jenkins_nodes_Dockerfle.git"
 
-# Install Docker CLI and dependencies
-USER root
-
-# Environment variables (defaults can be overridden at runtime)
+# ── Runtime env defaults (all overridable at docker run / k8s pod spec) ───────
+# JAVA_HOME is hardcoded to java-21; do not substitute a lower version.
 ENV JENKINS_URL="" \
     JENKINS_SECRET="" \
     JENKINS_AGENT_NAME="docker" \
     JENKINS_WEB_SOCKET="true" \
-    JENKINS_AGENT_WORKDIR="/var/jenkins_home/node"
+    JENKINS_AGENT_WORKDIR="/var/jenkins_home/node" \
+    JAVA_HOME="/usr/lib/jvm/java-21-openjdk-amd64" \
+    PATH="/usr/lib/jvm/java-21-openjdk-amd64/bin:/usr/local/bin:$PATH" \
+    DOCKER_BUILDKIT=1 \
+    DEBIAN_FRONTEND=noninteractive \
+    # Python — suppress bytecode writes and force stdout/stderr to be unbuffered
+    # so Jenkins console output is never garbled.
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
+# ─────────────────────────────────────────────────────────────────────────────
+# LAYER 1 — Core OS packages + Docker repo + HashiCorp repo
+# Combining update + install + cleanup in a single RUN keeps the layer lean.
+# --no-install-recommends cuts ~30-50 MB from base dependencies.
+# Java is installed as openjdk-21-jre-headless (hardcoded, not via ARG).
+# ─────────────────────────────────────────────────────────────────────────────
+USER root
 
 RUN apt-get update && \
-    apt-get install -y \
-    apt-transport-https \
-    ca-certificates \
-    curl \
-    wget \
-    maven \
-    gnupg \
-    lsb-release \
-    lynis \
-    colorized-logs \
-    fontconfig \
-    openjdk-21-jre && \
+    apt-get install -y --no-install-recommends \
+        apt-transport-https \
+        ca-certificates \
+        curl \
+        wget \
+        gnupg \
+        lsb-release \
+        fontconfig \
+        maven \
+        lynis \
+        colorized-logs \
+        unzip \
+        git \
+        jq \
+        openjdk-21-jre-headless && \
+    # ── Docker CE repo ────────────────────────────────────────────────────────
     install -m 0755 -d /etc/apt/keyrings && \
-    curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc && \
+    curl -fsSL https://download.docker.com/linux/debian/gpg \
+         -o /etc/apt/keyrings/docker.asc && \
     chmod a+r /etc/apt/keyrings/docker.asc && \
-    bash -c 'echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian \
-    $(. /etc/os-release && echo ${VERSION_CODENAME}) stable" > /etc/apt/sources.list.d/docker.list' && \
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] \
+         https://download.docker.com/linux/debian \
+         $(. /etc/os-release && echo "${VERSION_CODENAME}") stable" \
+         > /etc/apt/sources.list.d/docker.list && \
+    # ── HashiCorp repo ────────────────────────────────────────────────────────
+    curl -fsSL https://apt.releases.hashicorp.com/gpg | \
+        gpg --dearmor -o /usr/share/keyrings/hashicorp-archive-keyring.gpg && \
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/hashicorp-archive-keyring.gpg] \
+         https://apt.releases.hashicorp.com \
+         $(lsb_release -cs) main" \
+         > /etc/apt/sources.list.d/hashicorp.list && \
+    # ── Install Docker CLI + Terraform ────────────────────────────────────────
+    # Installing only docker-ce-cli (not the full daemon) is intentional:
+    # the host Docker socket is bind-mounted at runtime, so the daemon is
+    # not needed inside the agent image. Add docker-ce + containerd.io only
+    # if you are doing Docker-in-Docker (DinD).
     apt-get update && \
-    apt-get install -y docker-ce docker-ce-cli containerd.io && \
+    apt-get install -y --no-install-recommends \
+        docker-ce-cli \
+        docker-buildx-plugin \
+        docker-compose-plugin \
+        terraform=${TERRAFORM_VERSION}-1 && \
+    # ── Hard-fail the build if Java is not exactly 21 ─────────────────────────
+    JAVA_MAJOR=$(java -version 2>&1 | grep -oP '(?<=version ")([0-9]+)' | head -1) && \
+    [ "$JAVA_MAJOR" = "21" ] || { echo "BUILD ERROR: expected Java 21, got $JAVA_MAJOR"; exit 1; } && \
+    echo "Java version check passed: $JAVA_MAJOR" && \
+    # ── Cleanup ───────────────────────────────────────────────────────────────
     apt-get clean && \
-    rm -rf /var/lib/apt/lists/*
+    rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
 
-# Install Gitleaks (latest release)
+# ─────────────────────────────────────────────────────────────────────────────
+# LAYER 2 — Python 3
+#
+# python3-full   : standard library + ensurepip/venv support
+# python3-dev    : C headers needed by pip packages that compile extensions
+#                  (e.g. cryptography, psycopg2)
+# python3-venv   : explicit venv support for pipeline virtualenvs
+#
+# Symlinks make `python` and `pip` resolve to python3/pip3, preventing
+# "command not found" errors in legacy Jenkinsfile sh() steps.
+#
+# Pre-installed pip packages cover the most common DevOps/AWS/K8s use-cases
+# so pipelines don't need a setup step for these.
+# ─────────────────────────────────────────────────────────────────────────────
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        python3 \
+        python3-pip \
+        python3-venv \
+        python3-dev \
+        python3-full && \
+    # Unambiguous python / pip aliases
+    ln -sf /usr/bin/python3 /usr/local/bin/python && \
+    ln -sf /usr/bin/pip3    /usr/local/bin/pip && \
+    # ── Pre-install common DevOps / AWS / K8s pip packages ───────────────────
+    pip3 install --no-cache-dir \
+        boto3 \
+        botocore \
+        ansible \
+        requests \
+        PyYAML \
+        jinja2 \
+        hvac \
+        kubernetes && \
+    # ── Smoke-test that everything imported correctly ─────────────────────────
+    python3 --version && \
+    pip3 --version && \
+    python3 -c "import boto3, ansible, kubernetes; print('Python packages OK')" && \
+    # ── Cleanup ───────────────────────────────────────────────────────────────
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
+
+# ─────────────────────────────────────────────────────────────────────────────
+# LAYER 3 — Gitleaks (pinned version, reproducible)
+# Using a fixed ARG version instead of querying /releases/latest at build time
+# ensures the build is reproducible and doesn't break when a new release drops.
+# ─────────────────────────────────────────────────────────────────────────────
 RUN set -eux; \
-    GITLEAKS_URL=$(curl -s https://api.github.com/repos/gitleaks/gitleaks/releases/latest \
-        | grep "browser_download_url" \
-        | grep "linux_x64.tar.gz" \
-        | cut -d '"' -f 4); \
-    curl -L "$GITLEAKS_URL" -o gitleaks.tar.gz; \
-    tar -xzf gitleaks.tar.gz; \
-    chmod +x gitleaks; \
-    mv gitleaks /usr/local/bin/gitleaks; \
-    rm gitleaks.tar.gz
+    ARCH="$(dpkg --print-architecture | sed 's/amd64/x64/;s/arm64/arm64/')"; \
+    GITLEAKS_URL="https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_${ARCH}.tar.gz"; \
+    curl -fsSL "$GITLEAKS_URL" -o /tmp/gitleaks.tar.gz; \
+    # Verify checksum (checksums.txt ships with every release)
+    CHECKSUM_URL="https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_checksums.txt"; \
+    curl -fsSL "$CHECKSUM_URL" -o /tmp/gitleaks_checksums.txt; \
+    ( cd /tmp && sha256sum --check --ignore-missing gitleaks_checksums.txt ); \
+    tar -xzf /tmp/gitleaks.tar.gz -C /tmp gitleaks; \
+    install -m 0755 /tmp/gitleaks /usr/local/bin/gitleaks; \
+    rm -f /tmp/gitleaks.tar.gz /tmp/gitleaks /tmp/gitleaks_checksums.txt; \
+    gitleaks version
 
-RUN wget -O- https://apt.releases.hashicorp.com/gpg | \
-    gpg --dearmor | \
-    tee /usr/share/keyrings/hashicorp-archive-keyring.gpg > /dev/null
+# ─────────────────────────────────────────────────────────────────────────────
+# LAYER 4 — Trivy (container & IaC vulnerability scanner)
+# Complements lynis for a full security scanning toolkit on the agent.
+# ─────────────────────────────────────────────────────────────────────────────
+RUN set -eux; \
+    TRIVY_VERSION=$(curl -s https://api.github.com/repos/aquasecurity/trivy/releases/latest \
+        | jq -r '.tag_name' | tr -d 'v'); \
+    ARCH="$(dpkg --print-architecture)"; \
+    curl -fsSL "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-$([ "$ARCH" = "amd64" ] && echo "64bit" || echo "ARM64").tar.gz" \
+         -o /tmp/trivy.tar.gz; \
+    tar -xzf /tmp/trivy.tar.gz -C /tmp trivy; \
+    install -m 0755 /tmp/trivy /usr/local/bin/trivy; \
+    rm -f /tmp/trivy.tar.gz /tmp/trivy; \
+    trivy --version
 
-RUN gpg --no-default-keyring \
-    --keyring /usr/share/keyrings/hashicorp-archive-keyring.gpg \
-    --fingerprint
+# ─────────────────────────────────────────────────────────────────────────────
+# LAYER 5 — Scripts
+# Copying scripts as late as possible so they don't bust the apt/tool layers
+# on every code change.
+# ─────────────────────────────────────────────────────────────────────────────
+COPY --chmod=755 node_status.sh  /usr/local/bin/node_status.sh
+COPY --chmod=755 dashboard.sh   /usr/local/bin/dashboard.sh
 
-RUN echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/hashicorp-archive-keyring.gpg] https://apt.releases.hashicorp.com $(grep -oP '(?<=UBUNTU_CODENAME=).*' /etc/os-release || lsb_release -cs) main" | tee /etc/apt/sources.list.d/hashicorp.list
+# ─────────────────────────────────────────────────────────────────────────────
+# LAYER 6 — Permissions, workspace directory, docker group membership
+# ─────────────────────────────────────────────────────────────────────────────
+RUN mkdir -p /var/jenkins_home/node && \
+    # Allow the jenkins user to talk to the bind-mounted Docker socket.
+    # GID 999 matches the default docker group GID on most Linux hosts;
+    # override with --group-add at runtime if your host uses a different GID.
+    groupadd -f -g 999 docker || true && \
+    usermod -aG docker jenkins && \
+    chown -R jenkins:jenkins /var/jenkins_home/node
 
-RUN apt update
-RUN apt-get install -y terraform
+# ─────────────────────────────────────────────────────────────────────────────
+# HEALTHCHECK — confirms the agent workspace is accessible
+# ─────────────────────────────────────────────────────────────────────────────
+HEALTHCHECK --interval=30s --timeout=10s --start-period=20s --retries=3 \
+    CMD test -d /var/jenkins_home/node && docker info > /dev/null 2>&1 || exit 1
 
-# Copy the script into the image
-COPY node_status.sh /usr/local/bin/node_status.sh
+# ─────────────────────────────────────────────────────────────────────────────
+# Drop privileges — never run the agent as root
+# ─────────────────────────────────────────────────────────────────────────────
+USER jenkins
 
-# Make it executable
-RUN chmod +x /usr/local/bin/node_status.sh
-COPY entrypoint.sh /entrypoint.sh
-RUN chmod +x /entrypoint.sh
-# Optional: Create volume
 VOLUME /var/jenkins_home/node
-ENTRYPOINT ["/entrypoint.sh"]
