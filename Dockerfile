@@ -17,7 +17,7 @@
 # ─────────────────────────────────────────────────────────────────────────────
 
 # ── Build-time version pins (override with --build-arg) ──────────────────────
-ARG JENKINS_AGENT_BASE=latest
+ARG JENKINS_AGENT_BASE=latest-jdk21
 ARG GITLEAKS_VERSION=8.24.3
 ARG TERRAFORM_VERSION=1.11.4
 # Java is intentionally NOT an ARG — hardcoded to 21 throughout this file
