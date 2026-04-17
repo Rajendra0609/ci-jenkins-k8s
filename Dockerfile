@@ -164,17 +164,15 @@ ENV PATH="/opt/venv/bin:$PATH"
 # ensures the build is reproducible and doesn't break when a new release drops.
 # ─────────────────────────────────────────────────────────────────────────────
 RUN set -eux; \
-    ARCH="$(dpkg --print-architecture | sed 's/amd64/x86_64/;s/arm64/arm64/')"; \
-    GITLEAKS_URL="https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_${ARCH}.tar.gz"; \
-    curl -fsSL "$GITLEAKS_URL" -o /tmp/gitleaks.tar.gz; \
-    CHECKSUM_URL="https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_checksums.txt"; \
-    curl -fsSL "$CHECKSUM_URL" -o /tmp/gitleaks_checksums.txt; \
-    cd /tmp; \
-    grep "gitleaks_${GITLEAKS_VERSION}_linux_${ARCH}.tar.gz" gitleaks_checksums.txt | sha256sum -c -; \
-    tar -xzf /tmp/gitleaks.tar.gz -C /tmp gitleaks; \
-    install -m 0755 /tmp/gitleaks /usr/local/bin/gitleaks; \
-    rm -f /tmp/gitleaks.tar.gz /tmp/gitleaks /tmp/gitleaks_checksums.txt; \
-    gitleaks version
+    GITLEAKS_URL=$(curl -s https://api.github.com/repos/gitleaks/gitleaks/releases/latest \
+        | grep "browser_download_url" \
+        | grep "linux_x64.tar.gz" \
+        | cut -d '"' -f 4); \
+    curl -L "$GITLEAKS_URL" -o gitleaks.tar.gz; \
+    tar -xzf gitleaks.tar.gz; \
+    chmod +x gitleaks; \
+    mv gitleaks /usr/local/bin/gitleaks; \
+    rm gitleaks.tar.gz
 
 # ─────────────────────────────────────────────────────────────────────────────
 # LAYER 4 — Trivy (container & IaC vulnerability scanner)
