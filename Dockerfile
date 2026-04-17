@@ -134,18 +134,16 @@ RUN apt-get update && \
 # Pre-installed pip packages cover the most common DevOps/AWS/K8s use-cases
 # so pipelines don't need a setup step for these.
 # ─────────────────────────────────────────────────────────────────────────────
+
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
         python3 \
-        python3-pip \
         python3-venv \
-        python3-dev \
-        python3-full && \
-    # Unambiguous python / pip aliases
-    ln -sf /usr/bin/python3 /usr/local/bin/python && \
-    ln -sf /usr/bin/pip3    /usr/local/bin/pip && \
-    # ── Pre-install common DevOps / AWS / K8s pip packages ───────────────────
-    pip3 install --no-cache-dir \
+        python3-pip \
+        python3-dev && \
+    python3 -m venv /opt/venv && \
+    /opt/venv/bin/pip install --no-cache-dir --upgrade pip && \
+    /opt/venv/bin/pip install --no-cache-dir \
         boto3 \
         botocore \
         ansible \
@@ -154,13 +152,11 @@ RUN apt-get update && \
         jinja2 \
         hvac \
         kubernetes && \
-    # ── Smoke-test that everything imported correctly ─────────────────────────
-    python3 --version && \
-    pip3 --version && \
-    python3 -c "import boto3, ansible, kubernetes; print('Python packages OK')" && \
-    # ── Cleanup ───────────────────────────────────────────────────────────────
+    /opt/venv/bin/python -c "import boto3, ansible, kubernetes; print('OK')" && \
     apt-get clean && \
-    rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
+    rm -rf /var/lib/apt/lists/*
+
+ENV PATH="/opt/venv/bin:$PATH"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # LAYER 3 — Gitleaks (pinned version, reproducible)
