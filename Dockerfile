@@ -44,23 +44,6 @@ LABEL maintainer="rajendra.daggubati1997@gmail.com" \
       org.opencontainers.image.documentation="https://github.com/Chowdary1997/Jenkins_jenkins_nodes_Dockerfle.git"
 
 # ── Runtime env defaults (all overridable at docker run / k8s pod spec) ───────
-# JAVA_HOME is hardcoded to java-21; do not substitute a lower version.
-ENV JENKINS_URL="" \
-    JENKINS_SECRET="" \
-    JENKINS_AGENT_NAME="docker" \
-    JENKINS_WEB_SOCKET="true" \
-    JENKINS_AGENT_WORKDIR="/var/jenkins_home/node" \
-    JAVA_HOME="/usr/lib/jvm/java-21-openjdk-amd64" \
-    PATH="/usr/lib/jvm/java-21-openjdk-amd64/bin:/usr/local/bin:$PATH" \
-    DOCKER_BUILDKIT=1 \
-    DEBIAN_FRONTEND=noninteractive \
-    # Python — suppress bytecode writes and force stdout/stderr to be unbuffered
-    # so Jenkins console output is never garbled.
-    PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1 \
-    PIP_NO_CACHE_DIR=1 \
-    PIP_DISABLE_PIP_VERSION_CHECK=1
-
 # ─────────────────────────────────────────────────────────────────────────────
 # LAYER 1 — Core OS packages + Docker repo + HashiCorp repo
 # Combining update + install + cleanup in a single RUN keeps the layer lean.
