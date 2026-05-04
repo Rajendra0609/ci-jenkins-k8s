@@ -1,8 +1,7 @@
 # Use official Jenkins LTS
-FROM jenkins/jenkins:2.541.2
-
+FROM jenkins/jenkins:2.555.1
 LABEL maintainer="rajendra.daggubati1997@gmail.com" \
-      version="2.541.2-k8s" \
+      version="2.555.1-k8s" \
       description="Production-ready Jenkins for Kubernetes" \
       org.opencontainers.image.source="https://github.com/Chowdary1997/Jenkins_jenkins_nodes_Dockerfle.git" \
       org.opencontainers.image.licenses="MIT"
