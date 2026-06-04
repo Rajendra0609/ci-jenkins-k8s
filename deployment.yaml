@@ -1,0 +1,107 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: jenkins
+  namespace: jenkins
+  labels:
+    app.kubernetes.io/name: jenkins
+    app.kubernetes.io/part-of: jenkins
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: jenkins
+  template:
+    metadata:
+      labels:
+        app: jenkins
+    spec:
+      serviceAccountName: jenkins
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: jenkins
+        image: docker.io/daggu1997/jenkins-docker-k8s:v1.0.2
+        ports:
+        - containerPort: 8080
+
+        securityContext:
+          runAsUser: 1000
+          runAsGroup: 1000
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: ["ALL"]
+
+        # 🔹 STARTUP PROBE — waits for Jenkins to fully boot
+        startupProbe:
+          httpGet:
+            path: /login
+            port: 8080
+          failureThreshold: 90
+          timeoutSeconds: 5
+          periodSeconds: 10
+          initialDelaySeconds: 30
+
+        # 🔹 READINESS PROBE — only then allow traffic
+        readinessProbe:
+          httpGet:
+            path: /login
+            port: 8080
+          initialDelaySeconds: 10
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 10
+
+        env:
+        - name: JENKINS_ADMIN_USER
+          valueFrom:
+            secretKeyRef:
+              name: jenkins-admin-secret
+              key: jenkins-user
+
+        - name: JENKINS_ADMIN_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: jenkins-admin-secret
+              key: jenkins-password
+
+        - name: JENKINS_URL
+          value: "https://jenkins.raja.com/"
+
+        - name: JAVA_OPTS
+          value: >
+            -Xms512m
+            -Xmx1024m
+            -Djava.awt.headless=true
+            -Djava.security.egd=file:/dev/./urandom
+            -Dorg.eclipse.jetty.util.log.LEVEL=INFO
+            -Djenkins.model.JenkinsLocationConfiguration.disableUrlValidation=true
+            -Dhudson.security.csrf.DefaultCrumbIssuer.EXCLUDE_SESSION_ID=true
+
+        resources:
+          requests:
+            cpu: "500m"
+            memory: "1Gi"
+          limits:
+            cpu: "800m"
+            memory: "2Gi"
+
+        volumeMounts:
+        - name: jenkins-home
+          mountPath: /var/jenkins_home
+        # Mounts the CSRF Groovy init script so Jenkins runs it on every startup.
+        # Replaces the imperative sed patch on config.xml (excludeClientIPFromCrumb=true).
+        - name: jenkins-init-scripts
+          mountPath: /var/jenkins_home/init.groovy.d
+
+      volumes:
+      - name: jenkins-home
+        persistentVolumeClaim:
+          claimName: mypvc
+      - name: jenkins-init-scripts
+        configMap:
+          name: jenkins-init-scripts

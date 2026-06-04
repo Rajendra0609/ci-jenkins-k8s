@@ -1,0 +1,140 @@
+<!--
+  Enhanced Custom Jenkins Login Page
+  - HEAD: improved meta, theme-color, optional Google font
+  - HEADER/BRANDING: inline SVG logo + product name
+  - FOOTER: links and copyright
+  - CUSTOMCSS: full CSS variables for easy theming
+
+  Deploy notes:
+  - This file is expected to be mounted from the `jenkins-login-page` ConfigMap (see Deployment volume `jenkins-login-page`).
+  - After updating the ConfigMap, restart the Jenkins pods to pick up the file: `kubectl rollout restart deployment/jenkins -n jenkins`.
+-->
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <meta name="theme-color" content="#0077c2" />
+  <title>Jenkins — Sign in</title>
+  <!-- Optional: use system font stack for performance; replace with Google Font if desired -->
+  <style>
+    /* Theme variables - edit these to restyle the page */
+    :root{
+      --brand-primary: #0077c2;
+      --brand-accent: #005fa3;
+      --bg-gradient-start: #e6f6ff;
+      --bg-gradient-end: #ffffff;
+      --muted: #6b7280;
+      --card-bg: rgba(255,255,255,0.92);
+      --card-radius: 14px;
+      --card-shadow: 0 12px 34px rgba(2,6,23,0.12);
+      --max-width: 480px;
+      --logo-size: 48px;
+      --font-family: "Segoe UI", Roboto, "Helvetica Neue", Arial, system-ui, sans-serif;
+    }
+
+    /* Base layout */
+    html,body{height:100%;margin:0;font-family:var(--font-family);background: linear-gradient(135deg,var(--bg-gradient-start) 0%, var(--bg-gradient-end) 60%);color:#0b2540}
+    .login-wrapper{min-height:100vh;display:flex;align-items:center;justify-content:center;padding:28px}
+    .login-card{width:100%;max-width:var(--max-width);background:var(--card-bg);border-radius:var(--card-radius);box-shadow:var(--card-shadow);backdrop-filter: blur(6px);padding:28px;box-sizing:border-box}
+
+    /* Header / branding */
+    .brand{display:flex;align-items:center;gap:12px;margin-bottom:14px}
+    .brand .logo{width:var(--logo-size);height:var(--logo-size);flex:0 0 var(--logo-size);border-radius:8px;overflow:hidden;background:#fff;display:flex;align-items:center;justify-content:center}
+    .brand h1{font-size:18px;margin:0;color:var(--brand-primary);line-height:1}
+    .brand .tag{font-size:13px;color:var(--muted)}
+
+    h2.heading{margin:6px 0 18px 0;font-size:18px;color:#083254}
+
+    /* Form tweaks (we move Jenkins' form into the placeholder) */
+    #injected-form-placeholder form{width:100%}
+    label{display:block;font-size:13px;color:var(--muted);margin-bottom:6px}
+    input[type=text],input[type=password]{width:100%;padding:12px;border-radius:10px;border:1px solid #e6e9ef;font-size:15px;box-sizing:border-box}
+
+    .submit-button{background:var(--brand-primary);color:#fff;border:none;padding:10px 14px;border-radius:10px;cursor:pointer;font-weight:600}
+    .submit-button:hover{background:var(--brand-accent)}
+
+    .links{margin-top:14px;text-align:center}
+    .links a{color:var(--brand-primary);text-decoration:none;font-size:13px;margin:0 6px}
+    .small{font-size:13px;color:var(--muted)}
+
+    footer{margin-top:14px;font-size:12px;text-align:center;color:var(--muted);display:flex;flex-direction:column;gap:6px}
+    footer .meta{font-size:12px}
+
+    /* Responsive */
+    @media (max-width:480px){.brand h1{font-size:16px}.login-card{padding:18px}}
+  </style>
+</head>
+<body>
+  <div class="login-wrapper">
+    <div class="login-card" id="custom-login-card">
+      <header class="brand" role="banner">
+        <div class="logo" aria-hidden="true">
+          <!-- Inline SVG logo: easier to theme and embed when loaded from a ConfigMap -->
+          <svg width="36" height="36" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" fill="none">
+            <rect rx="4" width="24" height="24" fill="#fff"/>
+            <path d="M12 2L2 7l10 5 10-5-10-5z" fill="var(--brand-primary)"/>
+            <path d="M12 8l-8 4v5c0 1.7 3.6 3 8 3s8-1.3 8-3v-5l-8-4z" fill="rgba(0,119,194,0.12)"/>
+          </svg>
+        </div>
+        <div>
+          <h1>Raja-Technologies CI/CD</h1>
+          <div class="tag small">Secure Jenkins portal</div>
+        </div>
+      </header>
+
+      <h2 class="heading">Sign in to Jenkins</h2>
+
+      <!-- Jenkins original login form will be moved here by the script below -->
+      <div id="injected-form-placeholder" aria-live="polite"></div>
+
+      <div class="links" role="navigation">
+        <a href="mailto:admin@example.com?subject=Request%20for%20Account%20Creation">Create Account</a> ·
+        <a href="mailto:admin@example.com?subject=Forgot%20Username%20or%20Password">Forgot username / password?</a>
+      </div>
+
+      <footer>
+        <div class="meta">© 2025 Raja-Technologies. All rights reserved.</div>
+        <div class="meta"><a href="/security" style="color:var(--brand-primary);text-decoration:none">Security & Privacy</a> · <a href="/terms" style="color:var(--brand-primary);text-decoration:none">Terms</a></div>
+      </footer>
+    </div>
+  </div>
+
+  <script>
+    (function(){
+      // Move Jenkins' existing login form into our styled card.
+      function moveForm(){
+        const main = document.getElementById('main-panel') || document.querySelector('.main-panel') || document.querySelector('#main');
+        if(!main) return;
+        const form = main.querySelector('form');
+        if(!form) return;
+
+        // Hide Jenkins branding header if present
+        const headIcon = document.getElementById('jenkins-head-icon');
+        if(headIcon) headIcon.style.display = 'none';
+
+        // Normalize inputs and buttons
+        const inputs = form.querySelectorAll('input');
+        inputs.forEach(i=>{ i.style.maxWidth='100%'; i.setAttribute('aria-label', i.placeholder || i.name || 'login-input'); });
+
+        // Move the form into our placeholder
+        const placeholder = document.getElementById('injected-form-placeholder');
+        if(placeholder && !placeholder.querySelector('form')){
+          placeholder.appendChild(form);
+          const submit = form.querySelector('button[type=submit], input[type=submit]');
+          if(submit){ submit.classList.add('submit-button'); }
+        }
+      }
+
+      // Retry while Jenkins renders the login form
+      let attempts = 0;
+      const id = setInterval(()=>{
+        attempts++;
+        moveForm();
+        if(attempts>60) clearInterval(id);
+      },150);
+    })();
+  </script>
+</body>
+</html>
+

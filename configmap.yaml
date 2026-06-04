@@ -1,0 +1,45 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: jenkins-config
+  namespace: jenkins
+  labels:
+    app.kubernetes.io/name: jenkins
+    app.kubernetes.io/part-of: jenkins
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+data:
+  JENKINS_HOME: "/var/jenkins_home"
+  # Add other Jenkins configuration key-value pairs here as needed
+---
+# This ConfigMap replaces the imperative sed patch:
+#   sed -i 's|<crumbIssuer class="hudson.security.csrf.DefaultCrumbIssuer"/>|
+#           <crumbIssuer ...><excludeClientIPFromCrumb>true</excludeClientIPFromCrumb></crumbIssuer>|' config.xml
+# Jenkins executes every *.groovy file under init.groovy.d/ on startup.
+# The script below sets excludeClientIPFromCrumb=true so the CSRF crumb
+# does NOT include the client IP — required when Jenkins sits behind
+# the nginx ingress (which rewrites the apparent source IP).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: jenkins-init-scripts
+  namespace: jenkins
+  labels:
+    app.kubernetes.io/name: jenkins
+    app.kubernetes.io/part-of: jenkins
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+data:
+  configure-csrf.groovy: |
+    import hudson.security.csrf.DefaultCrumbIssuer
+    import jenkins.model.Jenkins
+
+    def jenkins = Jenkins.getInstance()
+    if (jenkins != null) {
+      // true  → excludeClientIPFromCrumb (equivalent to the sed patch on config.xml)
+      // This is safe to run on every restart — idempotent.
+      def crumb = new DefaultCrumbIssuer(true)
+      jenkins.setCrumbIssuer(crumb)
+      jenkins.save()
+      println "[init] CSRF crumb issuer configured: excludeClientIPFromCrumb=true"
+    }

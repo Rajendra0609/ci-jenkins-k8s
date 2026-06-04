@@ -1,0 +1,34 @@
+| Field                                       | What to Set                                                 |
+| ------------------------------------------- | ----------------------------------------------------------- |
+| **Name**                                    | `kube-s`                                                    |
+| **Namespace**                               | `jenkins`                                                   |
+| **Labels**                                  | `kube-s`                                                    |
+| **Usage**                                   | ✅ Only build jobs with label expressions matching this node |
+| **Pod template to inherit from**            | (leave empty unless you created a base template)            |
+| **Name of container running Jenkins agent** | `jnlp`                                                      |
+| **Inject Jenkins agent in agent container** | ❌ NO (you already use inbound-agent style image)            |
+| Setting                        | Value                            |
+| ------------------------------ | -------------------------------- |
+| **Concurrency Limit**          | 10 (or higher if heavy workload) |
+| **Pod Retention**              | `Never` 🔥                       |
+| **Idle Minutes**               | 0                                |
+| **Pod Deadline (seconds)**     | 0                                |
+| **Jenkins Connection Timeout** | 1000 (OK)                        |
+| **Yaml merge strategy**        | Override                         |
+| **Show raw yaml in console**   | Optional                         |
+
+| Field               | Value     |
+| ------------------- | --------- |
+| **Service Account** | `jenkins` |
+
+| Setting          | Value                           |
+| ---------------- | ------------------------------- |
+| ImagePullSecrets | Empty (unless private registry) |
+| Service Account  | jenkins                         |
+| RunAs User/Group | Empty                           |
+| Host Network     | Disabled                        |
+| Node Selector    | Empty                           |
+| Workspace Volume | EmptyDir                        |
+| In Memory        | Disabled                        |
+| Size Limit       | Optional (5Gi recommended)      |
+

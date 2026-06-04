@@ -1,0 +1,20 @@
+kubectl get namespace jenkins -o json > jenkins-ns.json
+
+
+"spec": {
+  "finalizers": [
+    "kubernetes"
+  ]
+}
+
+
+kubectl replace --raw "/api/v1/namespaces/jenkins/finalize" -f ./jenkins-ns.json
+
+
+kubectl delete pv jenkins-pv
+
+
+kubectl patch pv jenkins-pv -p '{"spec":{"claimRef": null}}'
+
+
+
