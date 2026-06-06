@@ -81,7 +81,15 @@ spec:
             -Dorg.eclipse.jetty.util.log.LEVEL=INFO
             -Djenkins.model.JenkinsLocationConfiguration.disableUrlValidation=true
             -Dhudson.security.csrf.DefaultCrumbIssuer.EXCLUDE_SESSION_ID=true
-
+            -Dorg.jenkinsci.plugins.durabletask.BourneShellScript.LAUNCH_DIAGNOSTICS=true
+            -Dhudson.remoting.ClassFilter=*
+            -Dorg.jenkinsci.remoting.engine.JnlpProtocol3.disabled=false
+            -Dorg.jenkinsci.remoting.engine.JnlpProtocol4.disabled=false
+            -Djava.util.logging.config.file=/var/jenkins_home/log.properties
+            -Dorg.jenkinsci.plugins.workflow.steps.durable_task.DurableTaskStep.USE_WATCHING=false
+            -Djava.io.tmpdir=/tmp
+            -Dhudson.PluginManager.logStartupPerformance=true
+            
         resources:
           requests:
             cpu: "500m"
