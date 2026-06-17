@@ -1,5 +1,5 @@
 # Use official Jenkins LTS
-FROM jenkins/jenkins:2.555.1
+FROM jenkins/jenkins:2.555.2
 LABEL maintainer="rajendra.daggubati1997@gmail.com" \
       version="2.555.1-k8s" \
       description="Production-ready Jenkins for Kubernetes" \
