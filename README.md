@@ -13,3 +13,5 @@ export DESTINATION="docker.io/daggu1997/jenkins-docker-k8s:v1.0.1"
   --destination "docker.io/daggu1997/jenkins-docker-k8s:v1.0.1" \
   --cache-repo "docker.io/daggu1997/cache" \
   --verbosity info
+
+./build-kaniko.sh   --docker-config "$HOME/.docker/config.json"   --destination "docker.io/daggu1997/jenkins-docker-k8s:v1.0.3"   --cache-repo "docker.io/daggu1997/cache"   --verbosity info
