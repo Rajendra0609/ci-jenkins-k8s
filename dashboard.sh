@@ -4,6 +4,25 @@
 # ║  Modular · Parallel · AWS-Aware · Threshold Alerts           ║
 # ╚══════════════════════════════════════════════════════════════╝
 #
+# CHANGELOG (this revision)
+#   1. FIX: section_resources' disk-usage loop piped `df` into a
+#      `while read` block. In bash, the right side of a pipe runs
+#      in a subshell, so print_status()'s PASSED/WARN/FAILED
+#      increments made inside that loop never reached the parent
+#      shell — disk warnings/criticals were silently dropped from
+#      the summary and from -x's exit code. Counters are now kept
+#      in a flock-guarded tally file instead of shell variables,
+#      so they're correct no matter which subshell/background job
+#      calls print_status().
+#   2. FEATURE: sections now run in parallel (each in its own
+#      background job, output buffered to a tmpfile) instead of
+#      sequentially. Since most sections are network-bound
+#      (GitHub API, Artifactory, Gerrit, IMDS, kubectl/helm/argocd
+#      calls), wall-clock time drops from "sum of all latencies"
+#      to roughly "the slowest single section." Output is still
+#      flushed to the terminal/log in the original, deterministic
+#      order once every job finishes.
+#
 # Usage: ./dashboard.sh [OPTIONS]
 #   -s <sections>   Comma-separated list of sections to run
 #                   Sections: git,cicd,k8s,aws,github,docker,jfrog,
@@ -30,8 +49,17 @@ PASSED=0; FAILED=0; WARN=0
 LOG_FILE=""
 QUIET=false
 EXIT_ON_FAIL=false
+BUFFERING=false           # true while a section runs as a background job
 TMPDIR_DASHBOARD=$(mktemp -d)
 trap 'rm -rf "$TMPDIR_DASHBOARD"' EXIT
+
+# Atomic tally file — replaces the old PASSED/WARN/FAILED shell-var
+# increments, which are unsafe across subshells and background jobs.
+TALLY_FILE="$TMPDIR_DASHBOARD/tally.log"
+TALLY_LOCK="$TMPDIR_DASHBOARD/tally.lock"
+: > "$TALLY_FILE"
+HAVE_FLOCK=false
+command -v flock &>/dev/null && HAVE_FLOCK=true
 
 # Default sections (all)
 ALL_SECTIONS="git,cicd,k8s,aws,github,docker,jfrog,gerrit,resources,tools,network,ssl"
@@ -84,7 +112,13 @@ section_enabled() {
 # OUTPUT HELPERS
 # ─────────────────────────────────────────────────────────────────
 _tee() {
-  if [[ -n "$LOG_FILE" ]]; then
+  # While a section is running as a backgrounded/buffered job, never
+  # write straight to LOG_FILE — concurrent appends from several
+  # background jobs could interleave mid-line. Buffered output gets
+  # flushed to LOG_FILE once, in order, after all jobs finish.
+  if [[ "$BUFFERING" == "true" ]]; then
+    cat
+  elif [[ -n "$LOG_FILE" ]]; then
     tee -a "$LOG_FILE"
   else
     cat
@@ -105,6 +139,21 @@ print_section() {
   print_line
 }
 
+# Atomic counter increment. Safe to call from the main shell, from a
+# `while read` loop on the right side of a pipe (a subshell), or from
+# a fully backgrounded section job — all three write to the same file.
+tally() {
+  local kind="$1"
+  if $HAVE_FLOCK; then
+    ( flock -x 200; echo "$kind" >> "$TALLY_FILE"; ) 200>"$TALLY_LOCK"
+  else
+    # flock unavailable — plain append. Short single-line appends are
+    # atomic in practice on Linux (writes under PIPE_BUF), so this is
+    # a reasonable fallback, just not formally guaranteed.
+    echo "$kind" >> "$TALLY_FILE"
+  fi
+}
+
 print_status() {
   local status=$1 message="$2" detail="${3:-}"
   local detail_str=""
@@ -112,13 +161,13 @@ print_status() {
 
   if   [[ "$status" -eq 0 ]]; then
     echo -e "   ${GREEN}✔${RESET}  $message${detail_str}" | _tee
-    PASSED=$((PASSED+1))
+    tally pass
   elif [[ "$status" -eq 2 ]]; then
     $QUIET || echo -e "   ${YELLOW}⚠${RESET}  $message${detail_str}" | _tee
-    WARN=$((WARN+1))
+    tally warn
   else
     echo -e "   ${RED}✖${RESET}  ${RED}$message${RESET}${detail_str}" | _tee
-    FAILED=$((FAILED+1))
+    tally fail
   fi
 }
 
@@ -130,7 +179,8 @@ kv() {
 }
 
 # ─────────────────────────────────────────────────────────────────
-# SPINNER  (shows while background jobs run)
+# SPINNER  (single-pid version, still used nowhere critical — kept
+# for any section that wants to show progress on one background job)
 # ─────────────────────────────────────────────────────────────────
 spinner() {
   local pid=$1 label="${2:-Working}"
@@ -142,6 +192,24 @@ spinner() {
     i=$((i+1))
   done
   printf "\r\033[K"   # clear line
+}
+
+# Aggregate spinner for N concurrent background jobs (used by main()).
+spinner_multi() {
+  local -n _pids=$1
+  local frames=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏')
+  local i=0
+  while :; do
+    local running=0
+    for pid in "${_pids[@]}"; do
+      kill -0 "$pid" 2>/dev/null && running=$((running+1))
+    done
+    [[ $running -eq 0 ]] && break
+    printf "\r   ${CYAN}%s${RESET} running %d section(s) in parallel... " "${frames[$((i % 10))]}" "$running"
+    sleep 0.15
+    i=$((i+1))
+  done
+  printf "\r\033[K"
 }
 
 # ─────────────────────────────────────────────────────────────────
@@ -336,7 +404,7 @@ section_k8s() {
   fi
 
   # ArgoCD
-  if [[ -n "${ARGOCD_SERVER:-}" || command -v argocd &>/dev/null ]]; then
+  if [[ -n "${ARGOCD_SERVER:-}" ]] || command -v argocd &>/dev/null; then
     print_status 0 "ArgoCD context detected"
     kv "ArgoCD server" "${ARGOCD_SERVER:-N/A}"
     if command -v argocd &>/dev/null && argocd app list &>/dev/null 2>&1; then
@@ -746,21 +814,27 @@ section_resources() {
   fi
 
   # Disk (all mounted filesystems)
+  # NOTE: changed from `df ... | while read` to process substitution.
+  # A pipe's right-hand side runs in a subshell in bash — print_status
+  # calls made inside one used to silently lose their tally (see
+  # CHANGELOG at top). Process substitution keeps this loop in the
+  # current shell, and the tally() counters are now subshell-safe
+  # either way, so this fixes the same bug through two independent
+  # layers of defense.
   echo "" | _tee
-  df -h --output=source,fstype,size,used,avail,pcent,target 2>/dev/null \
-    | grep -v '^tmpfs\|^overlay\|^devtmpfs\|^udev\|^Filesystem' \
-    | while IFS= read -r line; do
-        local pct mount
-        pct=$(echo "$line" | awk '{print $6}' | tr -d '%')
-        mount=$(echo "$line" | awk '{print $7}')
-        [[ "$mount" == "/snap"* ]] && continue
-        local disk_status disk_color=""
-        disk_status=$(threshold_status "${pct:-0}" "$DISK_WARN_THRESHOLD" "$DISK_CRIT_THRESHOLD")
-        [[ "$disk_status" -eq 1 ]] && disk_color="$RED"
-        [[ "$disk_status" -eq 2 ]] && disk_color="$YELLOW"
-        kv "Disk [$mount]" "$(echo "$line" | awk '{print $4 " / " $3 " (" $6 " used)"}')" "$disk_color"
-        [[ "$disk_status" -ne 0 ]] && print_status "$disk_status" "Disk usage at ${pct}% on $mount"
-      done
+  while IFS= read -r line; do
+    local pct mount
+    pct=$(echo "$line" | awk '{print $6}' | tr -d '%')
+    mount=$(echo "$line" | awk '{print $7}')
+    [[ "$mount" == "/snap"* ]] && continue
+    local disk_status disk_color=""
+    disk_status=$(threshold_status "${pct:-0}" "$DISK_WARN_THRESHOLD" "$DISK_CRIT_THRESHOLD")
+    [[ "$disk_status" -eq 1 ]] && disk_color="$RED"
+    [[ "$disk_status" -eq 2 ]] && disk_color="$YELLOW"
+    kv "Disk [$mount]" "$(echo "$line" | awk '{print $4 " / " $3 " (" $6 " used)"}')" "$disk_color"
+    [[ "$disk_status" -ne 0 ]] && print_status "$disk_status" "Disk usage at ${pct}% on $mount"
+  done < <(df -h --output=source,fstype,size,used,avail,pcent,target 2>/dev/null \
+      | grep -v '^tmpfs\|^overlay\|^devtmpfs\|^udev\|^Filesystem')
 }
 
 # ─────────────────────────────────────────────────────────────────
@@ -898,23 +972,42 @@ main() {
   echo -e "${DIM}  $(date '+%A, %d %B %Y — %H:%M:%S %Z')${RESET}" | _tee
   print_double_line
 
-  section_system
+  section_system   # cheap, always synchronous
 
-  # Run sections (sequentially; swap to background+spinner pattern below for speed)
-  section_git
-  section_cicd
-  section_k8s
-  section_aws
-  section_github
-  section_docker
-  section_jfrog
-  section_gerrit
-  section_resources
-  section_tools
-  section_network
-  section_ssl
+  # ── Run remaining sections in parallel ─────────────────────────
+  # Each enabled section runs as its own background job with output
+  # buffered to a tmpfile (BUFFERING=true suppresses direct LOG_FILE
+  # writes inside the job — see _tee). Once every job finishes, the
+  # buffers are flushed to the terminal/log in this fixed order, so
+  # the visible output is identical to the old sequential run, just
+  # produced roughly as fast as the single slowest section instead
+  # of the sum of all of them.
+  local ORDER=(git cicd k8s aws github docker jfrog gerrit resources tools network ssl)
+  local BUFFER_DIR="$TMPDIR_DASHBOARD/buffers"
+  mkdir -p "$BUFFER_DIR"
+  local pids=()
+
+  for sec in "${ORDER[@]}"; do
+    section_enabled "$sec" || continue
+    ( BUFFERING=true; "section_$sec" ) > "$BUFFER_DIR/$sec.log" 2>&1 &
+    pids+=("$!")
+  done
+
+  [[ ${#pids[@]} -gt 0 ]] && spinner_multi pids
+
+  for sec in "${ORDER[@]}"; do
+    section_enabled "$sec" || continue
+    [[ -f "$BUFFER_DIR/$sec.log" ]] && cat "$BUFFER_DIR/$sec.log" | _tee
+  done
 
   # ── SUMMARY ───────────────────────────────────────────────────
+  # `grep -c` prints "0" AND exits non-zero when nothing matches, so a
+  # naive `|| echo 0` fallback double-prints on a legitimately-zero
+  # category. `|| true` keeps this safe under `set -e` without that.
+  PASSED=$(grep -c '^pass$' "$TALLY_FILE" 2>/dev/null || true); PASSED=${PASSED:-0}
+  WARN=$(grep -c '^warn$' "$TALLY_FILE" 2>/dev/null || true); WARN=${WARN:-0}
+  FAILED=$(grep -c '^fail$' "$TALLY_FILE" 2>/dev/null || true); FAILED=${FAILED:-0}
+
   local end_time elapsed
   end_time=$(date +%s)
   elapsed=$((end_time - start_time))
