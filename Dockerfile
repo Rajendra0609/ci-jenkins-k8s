@@ -1,5 +1,5 @@
 # Use official Jenkins LTS
-FROM jenkins/jenkins:2.555.3
+FROM jenkins/jenkins:2.568.1
 LABEL maintainer="rajendra.daggubati1997@gmail.com" \
       version="2.555.3-k8s" \
       description="Production-ready Jenkins for Kubernetes" \
@@ -23,6 +23,10 @@ RUN apt-get update && \
 COPY --chown=jenkins:jenkins plugins.txt /usr/share/jenkins/ref/plugins.txt
 RUN jenkins-plugin-cli --plugin-file /usr/share/jenkins/ref/plugins.txt
 
+# Security hardening
+RUN mkdir -p /var/jenkins_home && \
+    chown -R jenkins:jenkins /var/jenkins_home
+    
 # Disable setup wizard (production auto setup)
 ENV JAVA_OPTS="-Djenkins.install.runSetupWizard=false"
 
@@ -32,7 +36,7 @@ RUN mkdir -p /var/jenkins_home && \
 
 VOLUME /var/jenkins_home
 
-EXPOSE 8080
+EXPOSE 8080 50000
 
 USER jenkins
 
