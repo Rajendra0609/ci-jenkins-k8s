@@ -17,7 +17,7 @@
 #   2. FEATURE: sections now run in parallel (each in its own
 #      background job, output buffered to a tmpfile) instead of
 #      sequentially. Since most sections are network-bound
-#      (GitHub API, Artifactory, Gerrit, IMDS, kubectl/helm/argocd
+#      (GitHub API, Nexus, SonarQube, Gerrit, IMDS, kubectl/helm/argocd
 #      calls), wall-clock time drops from "sum of all latencies"
 #      to roughly "the slowest single section." Output is still
 #      flushed to the terminal/log in the original, deterministic
@@ -25,7 +25,7 @@
 #
 # Usage: ./dashboard.sh [OPTIONS]
 #   -s <sections>   Comma-separated list of sections to run
-#                   Sections: git,cicd,k8s,aws,github,docker,jfrog,
+#                   Sections: git,cicd,k8s,aws,github,docker,nexus,sonar,
 #                             gerrit,resources,tools,network,ssl
 #   -o <file>       Write output to a log file as well
 #   -q              Quiet: suppress warnings, show only pass/fail
@@ -62,7 +62,7 @@ HAVE_FLOCK=false
 command -v flock &>/dev/null && HAVE_FLOCK=true
 
 # Default sections (all)
-ALL_SECTIONS="git,cicd,k8s,aws,github,docker,jfrog,gerrit,resources,tools,network,ssl"
+ALL_SECTIONS="git,cicd,k8s,aws,github,docker,nexus,sonar,gerrit,resources,tools,network,ssl"
 RUN_SECTIONS="$ALL_SECTIONS"
 
 # ─────────────────────────────────────────────────────────────────
@@ -84,7 +84,8 @@ SSL_WARN_DAYS="${SSL_WARN_DAYS:-30}"                 # days before expiry
 SSL_DOMAINS="${SSL_DOMAINS:-}"                       # space-separated domains
 NETWORK_HOSTS="${NETWORK_HOSTS:-8.8.8.8 1.1.1.1}"   # ping targets
 PORT_CHECKS="${PORT_CHECKS:-}"                       # "host:port host:port ..."
-ARTIFACTORY_URL="${ARTIFACTORY_URL:-}"
+NEXUS_URL="${NEXUS_URL:-}"
+SONAR_URL="${SONAR_URL:-}"
 GERRIT_URL="${GERRIT_URL:-}"
 
 # ─────────────────────────────────────────────────────────────────
@@ -216,12 +217,13 @@ spinner_multi() {
 # THRESHOLD HELPERS
 # ─────────────────────────────────────────────────────────────────
 threshold_status() {
-  # Returns 0 (ok), 1 (critical), 2 (warn) based on numeric value + thresholds
+  # Returns 0 (ok), 1 (critical), 2 (warn) based on numeric value + thresholds.
+  # Uses awk rather than bc for the floating-point comparison — bc is not
+  # installed by default on many minimal/container base images, while awk
+  # almost always is.
   local val=$1 warn=$2 crit=$3
-  if   (( $(echo "$val >= $crit" | bc -l) )); then echo 1
-  elif (( $(echo "$val >= $warn" | bc -l) )); then echo 2
-  else echo 0
-  fi
+  awk -v v="$val" -v w="$warn" -v c="$crit" \
+    'BEGIN { if (v+0 >= c+0) print 1; else if (v+0 >= w+0) print 2; else print 0 }'
 }
 
 # ─────────────────────────────────────────────────────────────────
@@ -244,8 +246,19 @@ section_git() {
   section_enabled git || return 0
   print_section "🌿  GIT PROJECT"
 
-  git_root=$(git rev-parse --show-toplevel 2>/dev/null) || { print_status 1 "Not a git repository"; return; }
+  # Always resolve the repo from $WORKSPACE when running under Jenkins,
+  # rather than whatever directory the script happens to be invoked
+  # from — $WORKSPACE is the one stable, guaranteed checkout location
+  # for the job, regardless of which step/stage/shell invokes this
+  # script. Falls back to the current directory when $WORKSPACE isn't
+  # set (local runs, other CI systems) or isn't itself a git repo
+  # (e.g. a custom checkout subdirectory).
+  local git_root
+  git_root=$(git -C "${WORKSPACE:-.}" rev-parse --show-toplevel 2>/dev/null) \
+    || git_root=$(git rev-parse --show-toplevel 2>/dev/null) \
+    || { print_status 1 "Not a git repository${WORKSPACE:+ (checked \$WORKSPACE=$WORKSPACE)}"; return; }
 
+  [[ -n "${WORKSPACE:-}" ]] && kv "Jenkins workspace" "$WORKSPACE"
   kv "Project"        "$(basename "$git_root")"
   kv "Branch"         "$(git -C "$git_root" rev-parse --abbrev-ref HEAD)"
   kv "Remote"         "$(git -C "$git_root" remote get-url origin 2>/dev/null || echo 'none')"
@@ -640,69 +653,185 @@ section_docker() {
 }
 
 # ─────────────────────────────────────────────────────────────────
-# SECTION: JFROG ARTIFACTORY
+# SECTION: NEXUS REPOSITORY MANAGER
 # ─────────────────────────────────────────────────────────────────
-section_jfrog() {
-  section_enabled jfrog || return 0
-  print_section "📦  JFROG ARTIFACTORY"
+section_nexus() {
+  section_enabled nexus || return 0
+  print_section "🗄️   NEXUS REPOSITORY MANAGER"
 
-  local url="${ARTIFACTORY_URL:-}"
-  local token="${ARTIFACTORY_TOKEN:-}"
-  local user="${ARTIFACTORY_USER:-}"
-  local pass="${ARTIFACTORY_PASS:-}"
+  local url="${NEXUS_URL:-}"
+  local token="${NEXUS_TOKEN:-}"
+  local user="${NEXUS_USER:-}"
+  local pass="${NEXUS_PASS:-}"
 
   if [[ -z "$url" ]]; then
-    print_status 2 "ARTIFACTORY_URL not set — skipping Artifactory checks"
+    print_status 2 "NEXUS_URL not set — skipping Nexus checks"
     return
   fi
 
+  # Liveness — /service/rest/v1/status needs no auth
+  local status_code
+  # `|| true` guards the assignment: curl exits non-zero on a refused/
+  # timed-out connection even though -w still writes "000" to stdout,
+  # and this script runs under `set -e` — without the guard, a down
+  # service would abort this code path before status_code is ever
+  # inspected, silently skipping the "unreachable" message entirely.
+  status_code=$(curl -s -o /dev/null -w "%{http_code}" \
+    "${url%/}/service/rest/v1/status" --connect-timeout 5 2>/dev/null) || true
+
+  if [[ "$status_code" == "200" ]]; then
+    print_status 0 "Nexus reachable"
+    kv "URL" "$url"
+  elif [[ "$status_code" == "000" ]]; then
+    print_status 1 "Nexus unreachable (connection timeout/refused): $url"
+    return
+  else
+    print_status 1 "Nexus returned HTTP $status_code on /status"
+    return
+  fi
+
+  # Writable check — flags read-only mode (freeze during maintenance, etc.)
+  local writable_code
+  writable_code=$(curl -s -o /dev/null -w "%{http_code}" \
+    "${url%/}/service/rest/v1/status/writable" --connect-timeout 5 2>/dev/null) || true
+  [[ "$writable_code" == "200" ]] \
+    && print_status 0 "Nexus node is writable" \
+    || print_status 2 "Nexus node may be read-only (HTTP $writable_code on /status/writable)"
+
   # Prefer token auth; fall back to basic
-  local auth_header
+  local auth_header=""
   if [[ -n "$token" ]]; then
     auth_header="Authorization: Bearer $token"
   elif [[ -n "$user" && -n "$pass" ]]; then
     auth_header="Authorization: Basic $(echo -n "$user:$pass" | base64)"
-  else
-    print_status 2 "No Artifactory credentials (ARTIFACTORY_TOKEN or ARTIFACTORY_USER/PASS)"
+  fi
+
+  if [[ -z "$auth_header" ]]; then
+    print_status 2 "No Nexus credentials (NEXUS_TOKEN or NEXUS_USER/NEXUS_PASS) — anonymous checks only"
     return
   fi
 
-  local sys_code
-  sys_code=$(curl -s -o /dev/null -w "%{http_code}" \
-    -H "$auth_header" "${url%/}/api/system/ping" \
-    --connect-timeout 5 2>/dev/null)
+  local repos_code
+  repos_code=$(curl -s -o /dev/null -w "%{http_code}" \
+    -H "$auth_header" "${url%/}/service/rest/v1/repositories" --connect-timeout 5 2>/dev/null) || true
 
-  if [[ "$sys_code" == "200" ]]; then
-    print_status 0 "Artifactory reachable and credentials valid"
-    kv "URL"     "$url"
+  if [[ "$repos_code" == "200" ]]; then
+    print_status 0 "Nexus credentials valid"
 
-    # Version
-    local version
-    version=$(curl -s -H "$auth_header" "${url%/}/api/system/version" \
-      --connect-timeout 5 2>/dev/null | jq -r '.version // "N/A"' 2>/dev/null)
-    kv "Version" "$version"
+    local repos_json repo_count fmts
+    repos_json=$(curl -s -H "$auth_header" "${url%/}/service/rest/v1/repositories" \
+      --connect-timeout 5 2>/dev/null) || true
+    repo_count=$(echo "$repos_json" | jq '. | length' 2>/dev/null)
+    fmts=$(echo "$repos_json" | jq -r '[.[].format] | unique | join(", ")' 2>/dev/null)
+    kv "Repositories" "${repo_count:-N/A}"
+    kv "Formats"      "${fmts:-N/A}"
 
-    # List repos (first 5)
-    local repos
-    repos=$(curl -s -H "$auth_header" "${url%/}/api/repositories" \
-      --connect-timeout 5 2>/dev/null \
-      | jq -r '.[].key' 2>/dev/null | head -5 | tr '\n' '  ')
-    kv "Repos (sample)" "${repos:-N/A}"
-
-    # Storage summary
-    local storage
-    storage=$(curl -s -H "$auth_header" "${url%/}/api/storageinfo" \
-      --connect-timeout 5 2>/dev/null)
-    if [[ -n "$storage" ]]; then
-      kv "Storage used"     "$(echo "$storage" | jq -r '.fileStoreSummary.usedSpace // "N/A"' 2>/dev/null)"
-      kv "Storage total"    "$(echo "$storage" | jq -r '.fileStoreSummary.totalSpace // "N/A"' 2>/dev/null)"
+    # Blob store usage (Nexus 3.29+)
+    local bs_json
+    bs_json=$(curl -s -H "$auth_header" "${url%/}/service/rest/v1/blobstores" \
+      --connect-timeout 5 2>/dev/null) || true
+    if echo "$bs_json" | jq -e '. | length > 0' &>/dev/null; then
+      while IFS= read -r bs; do
+        local bs_name bs_used bs_avail
+        bs_name=$(echo "$bs" | jq -r '.name' 2>/dev/null)
+        bs_used=$(echo "$bs" | jq -r '.blobStoreMetrics.totalSize // "N/A"' 2>/dev/null)
+        bs_avail=$(echo "$bs" | jq -r '.blobStoreMetrics.availableSpaceInBytes // "N/A"' 2>/dev/null)
+        kv "Blob store [$bs_name]" "used: ${bs_used}B  avail: ${bs_avail}B"
+      done < <(echo "$bs_json" | jq -c '.[]' 2>/dev/null)
     fi
-  elif [[ "$sys_code" == "401" ]]; then
-    print_status 1 "Artifactory credentials invalid (HTTP 401)"
-  elif [[ "$sys_code" == "000" ]]; then
-    print_status 1 "Artifactory unreachable (connection timeout/refused): $url"
+  elif [[ "$repos_code" == "401" ]]; then
+    print_status 1 "Nexus credentials invalid (HTTP 401)"
   else
-    print_status 1 "Artifactory returned HTTP $sys_code"
+    print_status 2 "Could not list repositories (HTTP $repos_code)"
+  fi
+}
+
+# ─────────────────────────────────────────────────────────────────
+# SECTION: SONARQUBE
+# ─────────────────────────────────────────────────────────────────
+section_sonar() {
+  section_enabled sonar || return 0
+  print_section "🔎  SONARQUBE"
+
+  local url="${SONAR_URL:-}"
+  local token="${SONAR_TOKEN:-}"
+
+  if [[ -z "$url" ]]; then
+    print_status 2 "SONAR_URL not set — skipping SonarQube checks"
+    return
+  fi
+
+  # Liveness + version — /api/system/status needs no auth.
+  # `|| true` guards against curl's own non-zero exit on a
+  # refused/timed-out connection under this script's `set -e`
+  # (see the matching note in section_nexus above).
+  local status_code
+  status_code=$(curl -s -o /dev/null -w "%{http_code}" \
+    "${url%/}/api/system/status" --connect-timeout 5 2>/dev/null) || true
+
+  if [[ "$status_code" == "000" ]]; then
+    print_status 1 "SonarQube unreachable (connection timeout/refused): $url"
+    return
+  elif [[ "$status_code" != "200" ]]; then
+    print_status 1 "SonarQube returned HTTP $status_code on /system/status"
+    return
+  fi
+
+  local status_json sq_status sq_version
+  status_json=$(curl -s "${url%/}/api/system/status" --connect-timeout 5 2>/dev/null) || true
+  sq_status=$(echo "$status_json" | jq -r '.status // "N/A"' 2>/dev/null)
+  sq_version=$(echo "$status_json" | jq -r '.version // "N/A"' 2>/dev/null)
+  kv "URL"     "$url"
+  kv "Version" "$sq_version"
+
+  [[ "$sq_status" == "UP" ]] \
+    && print_status 0 "SonarQube status: $sq_status" \
+    || print_status 1 "SonarQube status: $sq_status (not UP)"
+
+  if [[ -z "$token" ]]; then
+    print_status 2 "SONAR_TOKEN not set — only anonymous status check run"
+    return
+  fi
+
+  # Token auth: username = token, password left blank
+  local valid_json valid
+  valid_json=$(curl -s -u "${token}:" "${url%/}/api/authentication/validate" \
+    --connect-timeout 5 2>/dev/null) || true
+  valid=$(echo "$valid_json" | jq -r '.valid // false' 2>/dev/null)
+
+  if [[ "$valid" != "true" ]]; then
+    print_status 1 "SonarQube token invalid"
+    return
+  fi
+  print_status 0 "SonarQube token valid"
+
+  # System health — requires admin permission; degrade quietly if not admin
+  local health_json health
+  health_json=$(curl -s -u "${token}:" "${url%/}/api/system/health" --connect-timeout 5 2>/dev/null) || true
+  health=$(echo "$health_json" | jq -r '.health // empty' 2>/dev/null)
+  if [[ -n "$health" ]]; then
+    [[ "$health" == "GREEN" ]] \
+      && print_status 0 "System health: $health" \
+      || print_status 1 "System health: $health"
+  fi
+
+  # Project count
+  local proj_json proj_count
+  proj_json=$(curl -s -u "${token}:" "${url%/}/api/projects/search?ps=1" \
+    --connect-timeout 5 2>/dev/null) || true
+  proj_count=$(echo "$proj_json" | jq -r '.paging.total // "N/A"' 2>/dev/null)
+  kv "Projects" "$proj_count"
+
+  # Optional: quality gate for one project (set SONAR_PROJECT_KEY to enable)
+  if [[ -n "${SONAR_PROJECT_KEY:-}" ]]; then
+    local qg_json qg_status
+    qg_json=$(curl -s -u "${token}:" \
+      "${url%/}/api/qualitygates/project_status?projectKey=${SONAR_PROJECT_KEY}" \
+      --connect-timeout 5 2>/dev/null) || true
+    qg_status=$(echo "$qg_json" | jq -r '.projectStatus.status // "N/A"' 2>/dev/null)
+    [[ "$qg_status" == "OK" ]] \
+      && print_status 0 "Quality gate [$SONAR_PROJECT_KEY]: $qg_status" \
+      || print_status 2 "Quality gate [$SONAR_PROJECT_KEY]: $qg_status"
   fi
 }
 
@@ -783,10 +912,11 @@ section_resources() {
   cpu_model=$(grep -m1 'model name' /proc/cpuinfo 2>/dev/null | cut -d: -f2 | xargs || lscpu 2>/dev/null | grep 'Model name' | cut -d: -f2 | xargs)
   cores=$(nproc 2>/dev/null || grep -c '^processor' /proc/cpuinfo 2>/dev/null || echo 1)
   IFS=' ' read -r load_1 load_5 load_15 _ < /proc/loadavg 2>/dev/null || { load_1=0; load_5=0; load_15=0; }
-  load_per_core_1=$(echo "scale=2; $load_1 / $cores" | bc -l)
+  load_per_core_1=$(awk -v l="$load_1" -v c="$cores" 'BEGIN { printf "%.2f", (c>0 ? l/c : l) }')
 
   local load_status
-  load_status=$(threshold_status "$load_per_core_1" "$LOAD_WARN_THRESHOLD" "$(echo "$LOAD_WARN_THRESHOLD * 2" | bc -l)")
+  load_status=$(threshold_status "$load_per_core_1" "$LOAD_WARN_THRESHOLD" \
+    "$(awk -v w="$LOAD_WARN_THRESHOLD" 'BEGIN { print w*2 }')")
   kv "CPU model"     "$cpu_model"
   kv "CPU cores"     "$cores"
   local load_color=""
@@ -801,7 +931,7 @@ section_resources() {
     mem_total=$(awk '/MemTotal/{print $2}' /proc/meminfo)
     mem_avail=$(awk '/MemAvailable/{print $2}' /proc/meminfo)
     mem_used=$(( mem_total - mem_avail ))
-    mem_pct=$(echo "scale=0; $mem_used * 100 / $mem_total" | bc)
+    mem_pct=$(awk -v u="$mem_used" -v t="$mem_total" 'BEGIN { printf "%.0f", (t>0 ? (u*100)/t : 0) }')
     local mem_human_used mem_human_total
     mem_human_used=$(free -h | awk '/Mem/{print $3}')
     mem_human_total=$(free -h | awk '/Mem/{print $2}')
@@ -982,7 +1112,7 @@ main() {
   # the visible output is identical to the old sequential run, just
   # produced roughly as fast as the single slowest section instead
   # of the sum of all of them.
-  local ORDER=(git cicd k8s aws github docker jfrog gerrit resources tools network ssl)
+  local ORDER=(git cicd k8s aws github docker nexus sonar gerrit resources tools network ssl)
   local BUFFER_DIR="$TMPDIR_DASHBOARD/buffers"
   mkdir -p "$BUFFER_DIR"
   local pids=()
